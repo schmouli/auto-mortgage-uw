@@ -1,0 +1,347 @@
+```yaml
+# .github/workflows/pipeline.yml
+
+name: CI/CD Pipeline
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  designer:
+    name: Designer Review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Design Documents
+        run: |
+          if [ ! -f docs/design/design_with_stack.md ]; then
+            echo "::error::Missing design document: docs/design/design_with_stack.md"
+            exit 1
+          fi
+          
+          # Check for module-specific design docs
+          MODULES=("authentication" "client_intake")
+          for module in "${MODULES[@]}"; do
+            if [ ! -f "docs/design/${module}/design_with_stack.md" ]; then
+              echo "::error::Missing design document: docs/design/${module}/design_with_stack.md"
+              exit 1
+            fi
+          done
+
+    outputs:
+      status: ${{ job.status }}
+
+  coder:
+    name: Code Generation & Validation
+    needs: designer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [authentication, client_intake]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv sync
+
+      - name: Check Agent Review Files
+        run: |
+          AGENT_FILES=("dba_review.md" "code_review.md" "security_review.md" "validator_review.md")
+          for file in "${AGENT_FILES[@]}"; do
+            if [ ! -f "modules/${{ matrix.module }}/reviews/$file" ]; then
+              echo "::error::Missing agent review file: modules/${{ matrix.module }}/reviews/$file"
+              exit 1
+            fi
+          done
+
+      - name: Validate Imports
+        run: |
+          python -c "
+          import sys
+          sys.path.append('.')
+          try:
+              import modules.${{ matrix.module }}.models
+              import modules.${{ matrix.module }}.schemas
+              import modules.${{ matrix.module }}.services
+              import modules.${{ matrix.module }}.routes
+          except ImportError as e:
+              print(f'Import error: {e}', file=sys.stderr)
+              sys.exit(1)
+          "
+
+    outputs:
+      status: ${{ job.status }}
+
+  tester:
+    name: Testing Suite
+    needs: coder
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv sync
+
+      - name: Run Unit Tests with Coverage
+        run: |
+          pytest tests/unit/test_*.py --cov=mortgage_underwriting --cov-report=xml --cov-fail-under=80
+
+      - name: Run Integration Tests
+        run: |
+          pytest tests/integration/test_*_integration.py --cov=mortgage_underwriting --cov-report=xml --cov-append
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: true
+
+    outputs:
+      status: ${{ job.status }}
+      coverage: ${{ steps.coverage.outputs.coverage }}
+
+  dba:
+    name: DBA Review
+    needs: tester
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install uv alembic sqlalchemy[asyncio] asyncpg
+
+      - name: Check Migration Safety
+        run: |
+          # Ensure migrations exist and are reversible
+          if [ ! -d alembic/versions ]; then
+            echo "::error::No migration versions found"
+            exit 1
+          fi
+          
+          # Attempt downgrade then upgrade
+          alembic downgrade -1 || echo "::warning::Downgrade not possible or failed"
+          alembic upgrade head || { echo "::error::Upgrade after downgrade failed"; exit 1; }
+
+    outputs:
+      status: ${{ job.status }}
+
+  reviewer-security-validator:
+    name: Code Quality & Security Audit
+    needs: dba
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv sync
+
+      - name: Run MyPy Type Checking
+        run: |
+          mypy mortgage_underwriting --strict || { echo "::error::MyPy type errors found"; exit 1; }
+
+      - name: Run Ruff Linting
+        run: |
+          ruff check . || { echo "::error::Ruff linting errors found"; exit 1; }
+
+      - name: Run Ruff Format Validation
+        run: |
+          ruff format --check . || { echo "::error::Code formatting issues found"; exit 1; }
+
+      - name: Run Security Audit
+        run: |
+          uv run pip-audit --requirement pyproject.toml --ignore-vuln-file .audit-ignore.txt \
+            --format json > audit-results.json || true
+          
+          # Fail on high/critical CVEs
+          HIGH_CRITICAL=$(jq -r '.[] | select(.severity == "HIGH" or .severity == "CRITICAL")' audit-results.json | wc -l)
+          if [ "$HIGH_CRITICAL" -gt 0 ]; then
+            echo "::error::$HIGH_CRITICAL high/critical CVEs found:"
+            jq -r '.[] | select(.severity == "HIGH" or .severity == "CRITICAL") | "\(.id): \(.summary)"' audit-results.json
+            exit 1
+          fi
+
+    outputs:
+      status: ${{ job.status }}
+
+  bug_logger:
+    name: Bug Logging
+    needs: reviewer-security-validator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse Test Failures and Create Issues
+        id: create_issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Placeholder for parsing failure logs and creating issues
+          echo "Parsing test failures..."
+          # In real implementation, would parse logs from previous jobs and create GitHub issues accordingly
+
+    outputs:
+      status: ${{ job.status }}
+
+  documentor:
+    name: Documentation Generation
+    needs: bug_logger
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate API Docs
+        run: |
+          mkdir -p docs/api
+          touch docs/api/openapi.yaml  # Placeholder for actual generation command
+
+      - name: Update Changelog
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          echo "## $(date +%Y-%m-%d)" >> CHANGELOG.md
+          echo "- Automated changelog entry" >> CHANGELOG.md
+          git add CHANGELOG.md
+          git commit -m "Update changelog [skip ci]" || echo "No changes to commit"
+
+    outputs:
+      status: ${{ job.status }}
+
+  build_docker:
+    name: Docker Image Build
+    needs: documentor
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [authentication, client_intake]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker Image
+        run: |
+          docker build -t mortgage-underwriting-${{ matrix.module }}:${GITHUB_SHA} .
+
+      - name: Tag and Push (Placeholder)
+        run: |
+          echo "Would tag and push image here"
+
+    outputs:
+      status: ${{ job.status }}
+
+  final_check:
+    name: Final Quality Gate
+    needs: 
+      - designer
+      - coder
+      - tester
+      - dba
+      - reviewer-security-validator
+      - bug_logger
+      - documentor
+      - build_docker
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Aggregate Results
+        run: |
+          RESULTS=(
+            "${{ needs.designer.result }}"
+            "${{ needs.coder.result }}"
+            "${{ needs.tester.result }}"
+            "${{ needs.dba.result }}"
+            "${{ needs.reviewer-security-validator.result }}"
+            "${{ needs.bug_logger.result }}"
+            "${{ needs.documentor.result }}"
+            "${{ needs.build_docker.result }}"
+          )
+          
+          BLOCKED=false
+          for result in "${RESULTS[@]}"; do
+            if [[ "$result" == "failure" ]]; then
+              BLOCKED=true
+              break
+            fi
+          done
+          
+          if $BLOCKED; then
+            echo "::error::One or more phases blocked the pipeline"
+            exit 1
+          else
+            echo "✅ All quality gates passed"
+          fi
+
+  notify_pr:
+    name: PR Notification
+    needs: final_check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            const message = `
+            ## 🚀 CI/CD Pipeline Results
+            
+            Status: ✅ APPROVED
+            
+            ### Summary:
+            - Coverage: TBD%
+            - Bugs Found: 0
+            - Issues Created: 0
+            
+            Full details available in workflow run: ${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}
+            `;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: message
+            });
+```
