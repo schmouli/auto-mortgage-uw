@@ -1,0 +1,23 @@
+# Development Configuration
+
+database:
+  url: postgresql://dev:dev@localhost:5432/mortgage_uw_dev
+  echo: true
+  pool_size: 5
+  pool_pre_ping: true
+
+logging:
+  level: DEBUG
+  format: verbose
+
+api:
+  debug: true
+  reload: true
+  host: 0.0.0.0
+  port: 8000
+
+security:
+  jwt_expiration: 86400
+
+cache:
+  enabled: false
