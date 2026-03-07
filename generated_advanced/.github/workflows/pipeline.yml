@@ -1,0 +1,265 @@
+```yaml
+# .github/workflows/pipeline.yml
+
+name: CI Pipeline
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  validate-design-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Check Design Docs Exist
+        run: |
+          modules=("authentication_user_management" "client_intake_application" "underwriting_engine")
+          missing_docs=()
+          for module in "${modules[@]}"; do
+            if [[ ! -f "docs/design/${module}/design_with_stack.md" ]]; then
+              echo "Missing design document for $module"
+              missing_docs+=("$module")
+            fi
+          done
+          
+          if [[ ${#missing_docs[@]} -gt 0 ]]; then
+            echo "::error::Design documents missing for modules: ${missing_docs[*]}"
+            exit 1
+          fi
+
+  static-analysis:
+    needs: validate-design-docs
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [authentication_user_management, client_intake_application, underwriting_engine]
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv sync
+
+      - name: Run Ruff Linting
+        run: uv run ruff check .
+
+      - name: Run Ruff Formatting
+        run: uv run ruff format --check .
+
+      - name: Run MyPy Type Checking
+        run: uv run mypy .
+
+      - name: Run Security Audit
+        run: uv run pip-audit
+
+      - name: Validate Agent Review Files Exist
+        run: |
+          reviews=("dba_review.md" "code_review.md" "security_review.md" "validator_review.md")
+          for review in "${reviews[@]}"; do
+            if [[ ! -f "docs/design/${{ matrix.module }}/$review" ]]; then
+              echo "::error::Missing agent review file: docs/design/${{ matrix.module }}/$review"
+              exit 1
+            fi
+          done
+
+  test-and-coverage:
+    needs: static-analysis
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv sync
+
+      - name: Run Unit Tests
+        run: |
+          export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres
+          uv run pytest tests/unit -v --cov=. --cov-report=xml --cov-fail-under=80
+
+      - name: Run Integration Tests
+        run: |
+          export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres
+          uv run pytest tests/integration -v
+
+      - name: Upload Coverage Report
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+
+  build-docker-images:
+    needs: test-and-coverage
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [authentication_user_management, client_intake_application, underwriting_engine]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build Docker Image
+        run: |
+          docker build -t mortgage-underwriting-${{ matrix.module }}:${GITHUB_SHA} \
+            -f docker/Dockerfile.${{ matrix.module }} .
+
+      - name: Save Docker Image
+        run: |
+          mkdir -p docker/images
+          docker save mortgage-underwriting-${{ matrix.module }}:${GITHUB_SHA} \
+            | gzip > docker/images/mortgage-underwriting-${{ matrix.module }}.tar.gz
+
+      - name: Upload Docker Image Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: docker-image-${{ matrix.module }}
+          path: docker/images/mortgage-underwriting-${{ matrix.module }}.tar.gz
+
+  run-integration-tests-in-container:
+    needs: build-docker-images
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [authentication_user_management, client_intake_application, underwriting_engine]
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download Docker Image
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-image-${{ matrix.module }}
+          path: docker/images/
+
+      - name: Load Docker Image
+        run: |
+          gunzip -c docker/images/mortgage-underwriting-${{ matrix.module }}.tar.gz | docker load
+
+      - name: Run Integration Tests Inside Container
+        run: |
+          docker run --network host \
+            -e DATABASE_URL=postgresql://postgres:postgres@host.docker.internal:5432/postgres \
+            mortgage-underwriting-${{ matrix.module }}:${GITHUB_SHA} \
+            pytest tests/integration -v
+
+  final-quality-gate:
+    needs: [run-integration-tests-in-container]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate Results
+        run: |
+          echo "All quality gates passed successfully."
+          echo "✅ APPROVED"
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🚀 CI Pipeline completed successfully!\n\n' +
+                    '- ✅ All tests passed with >=80% coverage\n' +
+                    '- ✅ No type errors found\n' +
+                    '- ✅ No critical/high CVEs detected\n' +
+                    '- ✅ All agent reviews approved'
+            })
+
+  failure-handler:
+    needs: [validate-design-docs, static-analysis, test-and-coverage, build-docker-images, run-integration-tests-in-container]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log Failure Details
+        run: |
+          echo "❌ BLOCKED - Pipeline failed due to one or more issues above."
+          echo "🔍 Review logs and fix accordingly."
+
+      - name: Create GitHub Issue for Failures
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const title = `[CI Failure] Pipeline failed on ${context.ref}`;
+            const body = `
+            ## CI Pipeline Failure Report
+            
+            Branch: ${context.ref}
+            Commit SHA: ${context.sha}
+            
+            Please investigate the following failures:
+            
+            - [ ] Static Analysis (linting, formatting, types)
+            - [ ] Test Coverage (<80%)
+            - [ ] Security Vulnerabilities (CVE scan)
+            - [ ] Agent Reviews Missing/BLOCKED
+            - [ ] Docker Build Failures
+            - [ ] Integration Tests Failed
+            
+            See full logs at: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+            `;
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['ci-failure', 'priority-high']
+            });
+
+      - name: Comment on PR about Failure
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🚨 CI Pipeline FAILED.\n\n' +
+                    'Please check the linked issue for details.'
+            });
+```
