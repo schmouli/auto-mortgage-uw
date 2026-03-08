@@ -1,0 +1,1 @@
+UnderwritingResultResponse: has extra fields ['application_id', 'client_id', 'cmhc_premium_amount', 'cmhc_required', 'conditions', 'created_at', 'created_by', 'decision', 'decline_reasons', 'gds_ratio', 'id', 'ltv_ratio', 'max_mortgage_amount', 'qualifies', 'qualifying_rate', 'stress_test_passed', 'tds_ratio']

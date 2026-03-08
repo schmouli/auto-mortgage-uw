@@ -1,0 +1,1 @@
+DocumentResponse: has extra fields ['application_id', 'created_at', 'document_type', 'file_name', 'file_path', 'file_size', 'id', 'is_verified', 'mime_type', 'rejection_reason', 'status', 'updated_at', 'uploaded_at', 'uploaded_by', 'verified_at', 'verified_by']

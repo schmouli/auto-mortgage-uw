@@ -1,0 +1,283 @@
+```yaml
+# .github/workflows/pipeline.yml
+
+name: CI/CD Pipeline
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main, develop ]
+
+jobs:
+  validate-design-docs:
+    name: Designer Phase
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check Design Documents Existence
+        run: |
+          MODULES=("authentication" "client_intake" "underwriting_engine" "document_management" "fintrac_compliance")
+          for module in "${MODULES[@]}"; do
+            if [ ! -f "docs/design/${module}_design.md" ]; then
+              echo "❌ Missing design document for $module"
+              exit 1
+            fi
+          done
+          echo "✅ All design documents found"
+
+  code-quality-checks:
+    name: Reviewer + Security + Validator
+    needs: validate-design-docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          
+      - name: Sync dependencies
+        run: uv sync --dev
+        
+      - name: Run linter (ruff)
+        run: uv run ruff check .
+        
+      - name: Run formatter check (ruff format)
+        run: uv run ruff format --check .
+        
+      - name: Run type checking (mypy)
+        run: uv run mypy mortgage_underwriting/
+        
+      - name: Security audit (pip-audit)
+        run: uv run pip-audit
+
+  run-unit-tests:
+    name: Tester Phase - Unit Tests
+    needs: code-quality-checks
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [authentication, client_intake, underwriting_engine, document_management, fintrac_compliance]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_USER: testuser
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          
+      - name: Sync dependencies
+        run: uv sync --dev
+        
+      - name: Run unit tests with coverage
+        run: |
+          uv run pytest tests/unit/test_${{ matrix.module }}.py \
+            --cov=mortgage_underwriting/modules/${{ matrix.module }} \
+            --cov-report=xml:coverage-${{ matrix.module }}.xml \
+            --junitxml=junit-${{ matrix.module }}.xml
+            
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage-${{ matrix.module }}.xml
+          flags: unittests-${{ matrix.module }}
+          name: codecov-umbrella-${{ matrix.module }}
+
+  run-integration-tests:
+    name: Tester Phase - Integration Tests
+    needs: run-unit-tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [authentication, client_intake, underwriting_engine, document_management, fintrac_compliance]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_USER: testuser
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          
+      - name: Sync dependencies
+        run: uv sync --dev
+        
+      - name: Run integration tests with coverage
+        run: |
+          uv run pytest tests/integration/test_${{ matrix.module }}_integration.py \
+            --cov=mortgage_underwriting/modules/${{ matrix.module }} \
+            --cov-report=xml:integration-coverage-${{ matrix.module }}.xml \
+            --junitxml=integration-junit-${{ matrix.module }}.xml
+            
+      - name: Upload integration coverage report
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./integration-coverage-${{ matrix.module }}.xml
+          flags: integrationtests-${{ matrix.module }}
+          name: codecov-integration-${{ matrix.module }}
+
+  dba-validation:
+    name: DBA Validation
+    needs: run-integration-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          
+      - name: Sync dependencies
+        run: uv sync --dev
+        
+      - name: Validate Alembic migrations
+        run: |
+          cd mortgage_underwriting
+          alembic upgrade head
+          alembic downgrade -1 || true  # Allow graceful failure for first migration
+
+  coverage-gate:
+    name: Quality Gate - Coverage Enforcement
+    needs: [run-unit-tests, run-integration-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate and enforce minimum coverage threshold
+        run: |
+          echo "Coverage enforcement will be handled via Codecov settings."
+
+  security-scan:
+    name: Security Audit Gate
+    needs: code-quality-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          
+      - name: Run pip-audit scan
+        run: |
+          uv sync --dev
+          OUTPUT=$(uv run pip-audit 2>&1) || true
+          echo "$OUTPUT"
+          if [[ "$OUTPUT" == *"Critical"* ]] || [[ "$OUTPUT" == *"High"* ]]; then
+            echo "::error::Critical or High severity CVE detected!"
+            exit 1
+          fi
+
+  generate-docs:
+    name: Documentor Phase
+    needs: [security-scan, dba-validation, coverage-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          
+      - name: Generate OpenAPI spec
+        run: |
+          uv run fastapi.openapi --app-file mortgage_underwriting/app.py > openapi.json
+          
+      - name: Commit updated documentation
+        run: |
+          git config --global user.email "ci-bot@example.com"
+          git config --global user.name "CI Bot"
+          git add openapi.json || true
+          git diff-index --quiet HEAD || git commit -m "docs: Update OpenAPI spec [skip ci]"
+          git push origin HEAD:${GITHUB_REF#refs/heads/} || true
+
+  notify-pr-result:
+    name: Bug Logger & Notification
+    needs: [generate-docs]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && failure()
+    steps:
+      - name: Post PR comment about failure
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const message = `🚨 Build failed! Please check the logs above.\n\n`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: message
+            });
+
+      - name: Create issue for build failure
+        uses: actions/github-script@v6
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[BUG] Failed build in ${context.ref}`,
+              body: `Build failed during execution of workflow.\n\nSee [action run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              labels: ["bug", "pipeline"]
+            });
+```

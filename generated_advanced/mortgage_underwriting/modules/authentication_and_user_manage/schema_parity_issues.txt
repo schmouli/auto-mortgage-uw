@@ -1,0 +1,1 @@
+UserResponse: has extra fields ['created_at', 'email', 'full_name', 'id', 'is_active', 'phone', 'role']
