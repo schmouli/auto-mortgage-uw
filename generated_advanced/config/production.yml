@@ -1,0 +1,23 @@
+# Production Configuration
+
+database:
+  url: ${DATABASE_URL}
+  echo: false
+  pool_size: 20
+  pool_pre_ping: true
+  max_overflow: 40
+
+logging:
+  level: INFO
+  format: json
+
+api:
+  debug: false
+  reload: false
+
+security:
+  jwt_expiration: 3600
+
+cache:
+  enabled: true
+  ttl: 3600
