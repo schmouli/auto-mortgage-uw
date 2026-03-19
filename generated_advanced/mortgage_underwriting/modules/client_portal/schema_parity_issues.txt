@@ -1,0 +1,1 @@
+NotificationResponse: has extra fields ['created_at', 'event_type', 'id', 'is_read', 'message', 'title']

@@ -1,0 +1,1 @@
+MigrationStatusResponse: has extra fields ['applied_at', 'description', 'id', 'revision']

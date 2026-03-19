@@ -1,0 +1,1 @@
+JobExecutionLogSchema: has extra fields ['completed_at', 'created_at', 'error_message', 'execution_id', 'id', 'job_name', 'started_at', 'status']

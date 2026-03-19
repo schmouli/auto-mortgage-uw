@@ -1,0 +1,1 @@
+SystemStatusResponse: has extra fields ['gpu_status', 'overall_status', 'services', 'timestamp']

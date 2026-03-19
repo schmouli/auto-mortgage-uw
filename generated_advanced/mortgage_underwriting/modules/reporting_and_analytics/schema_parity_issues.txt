@@ -1,0 +1,1 @@
+ReportCacheResponse: has extra fields ['data', 'expires_at', 'generated_at', 'id', 'period_end', 'period_start', 'report_type']
