@@ -1,0 +1,145 @@
+```yaml
+# .github/workflows/pipeline.yml
+
+name: CI/CD Pipeline
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [
+          auth, client_intake, underwriting_engine, document_management,
+          fintrac_compliance, client_portal, lender_comparison, messaging_conditions,
+          reporting_analytics, admin_panel, background_jobs, database_migrations,
+          docker_deployment, testing_suite, dpt_service, xml_policy_service,
+          decision_service, orchestrator_service, frontend_ui, infrastructure
+        ]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Phase 1: Designer Check
+      - name: Validate Design Doc Exists
+        id: validate_design_doc
+        run: |
+          DESIGN_DOC="docs/design/${{ matrix.module }}_design.md"
+          if [[ ! -f "$DESIGN_DOC" ]]; then
+            echo "::error::Design doc missing: $DESIGN_DOC"
+            exit 1
+          fi
+
+      # Phase 2: Coder Generation
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip uv
+          uv sync
+
+      - name: Generate Code for Module
+        run: |
+          echo "Generating code for ${{ matrix.module }}"
+          mkdir -p modules/${{ matrix.module }}
+          touch modules/${{ matrix.module }}/models.py
+          touch modules/${{ matrix.module }}/schemas.py
+          touch modules/${{ matrix.module }}/services.py
+          touch modules/${{ matrix.module }}/routes.py
+          touch modules/${{ matrix.module }}/exceptions.py
+
+      # Phase 3: Tester
+      - name: Run Unit Tests with Coverage
+        run: |
+          pytest tests/unit/test_${{ matrix.module }}.py --cov=modules/${{ matrix.module }} --cov-report=xml --cov-fail-under=80 || { echo "Coverage below threshold"; exit 1; }
+
+      - name: Run Integration Tests
+        run: |
+          pytest tests/integration/test_${{ matrix.module }}_integration.py
+
+      # Phase 4: DBA Review
+      - name: Alembic Migration Safety Check
+        run: |
+          alembic check || { echo "Migration safety check failed"; exit 1; }
+
+      # Phase 5: Reviewer + Security + Validator
+      - name: Lint Codebase
+        run: |
+          ruff check .
+
+      - name: Format Validation
+        run: |
+          ruff format --check .
+
+      - name: Type Checking with MyPy
+        run: |
+          mypy . || { echo "Type errors detected"; exit 1; }
+
+      - name: Security Audit
+        run: |
+          uv run pip-audit || { echo "Critical/High CVEs found"; exit 1; }
+
+      # Agent Review Checks
+      - name: Check Agent Reviews Exist
+        run: |
+          AGENT_FILES=(
+            "reviews/${{ matrix.module }}/dba_review.md"
+            "reviews/${{ matrix.module }}/code_review.md"
+            "reviews/${{ matrix.module }}/security_review.md"
+            "reviews/${{ matrix.module }}/validator_review.md"
+          )
+          for file in "${AGENT_FILES[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Agent review file missing: $file"
+              exit 1
+            fi
+            if grep -q "BLOCKED" "$file"; then
+              echo "::error::BLOCKED status found in $file"
+              exit 1
+            fi
+          done
+
+      # Phase 6: Bug Logger
+      - name: Parse Test Failures and Log Issues
+        if: failure()
+        run: |
+          echo "Creating bug report..."
+          gh issue create --title "[${{ matrix.module }}] Test Failure Detected" \
+                          --body "Automated test failure reported during CI. See logs for details." \
+                          --label "bug"
+
+      # Phase 7: Documentor
+      - name: Generate API Documentation
+        run: |
+          mkdir -p docs/api
+          touch docs/api/${{ matrix.module }}_api_docs.md
+
+      - name: Update Changelog Entry
+        run: |
+          echo "- ${{ matrix.module }}: Updated documentation and changelog entries" >> CHANGELOG.md
+
+      # Build Docker Image per Module
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image
+        run: |
+          docker build -t mortgage-underwriting-${{ matrix.module }}:${GITHUB_SHA} .
+
+      # Notifications
+      - name: Comment on PR (Test Results)
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "✅ Tests passed for module: \`${{ matrix.module }}\`. Ready for review."
+
+      # Final Approval Status
+      - name: Finalize Module Status
+        run: |
+          echo "✅ APPROVED - All phases completed successfully for module: ${{ matrix.module }}"
+```

@@ -1,0 +1,7 @@
+Module: Infrastructure & Deployment
+Cycle: 2
+Attempt: 0
+Response Length: 307
+
+Full Response (capped at 50KB):
+{"tests_py": "from mortgage_underwriting.modules.infra.models import HealthCheckResult, DeploymentStatus\n\n# Test cases using correct model imports\nasync def test_health_check_insert():\n    # Test implementation\n    pass\n\nasync def test_deployment_status_flow():\n    # Test implementation\n    pass"}

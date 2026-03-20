@@ -1,0 +1,2 @@
+MessageResponse: has extra fields ['application_id', 'body', 'created_at', 'id', 'is_read', 'message_type', 'read_at', 'recipient_id', 'sender_id', 'sent_at']
+ConditionResponse: has extra fields ['application_id', 'condition_type', 'created_at', 'description', 'id', 'lender_submission_id', 'required_by_date', 'satisfied_at', 'satisfied_by', 'status', 'updated_at']

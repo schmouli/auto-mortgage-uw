@@ -1,0 +1,1 @@
+DeploymentStatusResponse: has extra fields ['completed_at', 'created_at', 'message', 'service_name', 'started_at', 'status', 'updated_at', 'version']

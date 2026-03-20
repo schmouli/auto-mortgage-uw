@@ -1,0 +1,1 @@
+LenderPolicyResponse: has extra fields ['created_at', 'id', 'is_active', 'lender_id', 'updated_at', 'version']

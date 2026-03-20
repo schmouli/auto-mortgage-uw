@@ -1,0 +1,3 @@
+ApplicationResponse: has extra fields ['borrower_id', 'created_at', 'id', 'lender_id', 'mortgage_amount', 'property_value', 'purchase_price', 'status', 'updated_at']
+DocumentResponse: has extra fields ['document_type', 'file_name', 'id', 's3_key', 'uploaded_at']
+FintracVerificationResponse: has extra fields ['application_id', 'created_at', 'id', 'transaction_reported', 'updated_at', 'verified']

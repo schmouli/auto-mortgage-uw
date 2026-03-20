@@ -1,0 +1,7 @@
+Module: Orchestrator Service
+Attempt: 1
+Response Length: 25
+
+Full Response (capped at 50KB):
+[Timeout: Model too slow]
+
