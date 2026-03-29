@@ -1,0 +1,404 @@
+Module: Client Portal
+Cycle: 2
+Attempt: 0
+Response Length: 15064
+
+Full Response (capped at 50KB):
+Looking at the security issues mentioned, I need to identify and fix the root causes. Based on the code provided, here are the main security concerns I can identify:
+
+1. **Missing input validation** - No comprehensive validation on user inputs
+2. **Hardcoded values** - Some default values should be configurable
+3. **Missing type hints** - Some functions lack proper type annotations
+
+Let me provide a surgical fix focusing on these key security issues:
+
+{"schemas_py": "from datetime import datetime
+from typing import Optional, List, Dict, Any
+
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+import re
+
+# --- Activity Log Schemas ---
+
+
+class ClientPortalActivityBase(BaseModel):
+    activity_type: str = Field(..., max_length=50, description=\"Type of activity performed\")
+    
+    @field_validator('activity_type')
+    @classmethod
+    def validate_activity_type(cls, v: str) -> str:
+        allowed_types = {'login', 'view_application', 'upload_document', 'logout', 'password_change'}
+        if v not in allowed_types:
+            raise ValueError(f'Invalid activity type. Must be one of: {allowed_types}')
+        return v
+    
+    ip_address: Optional[str] = Field(None, max_length=45, description=\"IP address of the user\")
+    
+    @field_validator('ip_address')
+    @classmethod
+    def validate_ip_address(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        # Basic IPv4/IPv6 validation
+        ipv4_pattern = r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+        ipv6_pattern = r'^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^::1$|^::$'
+        if not re.match(ipv4_pattern, v) and not re.match(ipv6_pattern, v):
+            raise ValueError('Invalid IP address format')
+        return v
+    
+    user_agent: Optional[str] = Field(None, description=\"Browser/user agent string\", max_length=500)
+    details: Optional[str] = Field(None, description=\"Additional details about the activity (JSON)\", max_length=1000)
+
+
+class ClientPortalActivityCreate(ClientPortalActivityBase):
+    user_id: int = Field(..., gt=0, description=\"ID of the user performing the activity\")
+
+
+class ClientPortalActivityResponse(ClientPortalActivityBase):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    user_id: int
+    created_at: datetime
+
+
+# --- Notification Schemas ---
+
+
+class NotificationBase(BaseModel):
+    title: str = Field(..., max_length=255)
+    
+    @field_validator('title')
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError('Title cannot be empty')
+        return v.strip()
+    
+    message: str = Field(..., min_length=1, max_length=2000)
+    notification_type: str = Field(..., max_length=50)
+    
+    @field_validator('notification_type')
+    @classmethod
+    def validate_notification_type(cls, v: str) -> str:
+        allowed_types = {'document_uploaded', 'status_changed', 'message_received', 'reminder'}
+        if v not in allowed_types:
+            raise ValueError(f'Invalid notification type. Must be one of: {allowed_types}')
+        return v
+    
+    reference_id: Optional[int] = Field(None, gt=0)
+
+
+class NotificationCreate(NotificationBase):
+    user_id: int = Field(..., gt=0)
+
+
+class NotificationUpdate(BaseModel):
+    is_read: Optional[bool] = Field(None)
+    read_at: Optional[datetime] = Field(None)
+
+
+class NotificationResponse(NotificationBase):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    user_id: int
+    is_read: bool
+    read_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+
+class NotificationListResponse(BaseModel):
+    items: List[NotificationResponse]
+    total: int
+    page: int
+    size: int
+
+
+class NotificationMarkReadAllRequest(BaseModel):
+    mark_all_as_read: bool = Field(True, description=\"Set to true to mark all notifications as read\")
+
+
+# --- User Preference Schemas ---
+
+
+class UserPreferenceBase(BaseModel):
+    timezone: str = Field(\"UTC\", max_length=50)
+    
+    @field_validator('timezone')
+    @classmethod
+    def validate_timezone(cls, v: str) -> str:
+        # Basic timezone validation - could be extended with pytz
+        if not re.match(r'^[A-Za-z/_]+$', v):
+            raise ValueError('Invalid timezone format')
+        return v
+    
+    language: str = Field(\"en\", max_length=10)
+    
+    @field_validator('language')
+    @classmethod
+    def validate_language(cls, v: str) -> str:
+        allowed_languages = {'en', 'fr'}  # Extend as needed
+        if v not in allowed_languages:
+            raise ValueError(f'Unsupported language. Supported: {allowed_languages}')
+        return v
+    
+    email_notifications_enabled: bool = True
+    in_app_notifications_enabled: bool = True
+    dashboard_layout: Optional[str] = Field(None, description=\"JSON string of dashboard layout\", max_length=5000)
+
+
+class UserPreferenceCreate(UserPreferenceBase):
+    user_id: int = Field(..., gt=0)
+
+
+class UserPreferenceUpdate(UserPreferenceBase):
+    pass
+
+
+class UserPreferenceResponse(UserPreferenceBase):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    user_id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+# --- Dashboard Schemas ---
+
+
+class ClientDashboardResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    pipeline_summary: Dict[str, int]  # e.g., {'draft': 2, 'submitted': 1}
+    flagged_files_count: int
+    recent_activity_feed: List[Dict[str, Any]]  # Simplified representation
+    quick_actions: List[str]  # e.g., ['start_new_application']
+
+
+class BrokerDashboardResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    pipeline_summary: Dict[str, int]
+    flagged_files_count: int
+    recent_activity_feed: List[Dict[str, Any]]
+    quick_actions: List[str]", "services_py": "from sqlalchemy.ext.asyncio import AsyncSession
+from typing import List, Tuple, Optional
+
+from sqlalchemy import select, update, func as sql_func
+import structlog
+
+from mortgage_underwriting.common.exceptions import NotFoundError
+from mortgage_underwriting.modules.portal.models import ClientPortalActivity, Notification, UserPreference
+from mortgage_underwriting.modules.portal.schemas import (
+    ClientPortalActivityCreate,
+    ClientPortalActivityResponse,
+    NotificationCreate,
+    NotificationUpdate,
+    NotificationResponse,
+    UserPreferenceCreate,
+    UserPreferenceUpdate,
+    UserPreferenceResponse,
+    ClientDashboardResponse,
+    BrokerDashboardResponse
+)
+
+logger = structlog.get_logger()
+
+
+class ClientPortalService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def log_activity(self, activity_in: ClientPortalActivityCreate) -> ClientPortalActivityResponse:
+        \"\"\"Log a client portal activity for audit purposes.\"\"\"
+        logger.info(\"logging_client_activity\", user_id=activity_in.user_id, activity_type=activity_in.activity_type)
+        
+        db_activity = ClientPortalActivity(
+            user_id=activity_in.user_id,
+            activity_type=activity_in.activity_type,
+            ip_address=activity_in.ip_address,
+            user_agent=activity_in.user_agent,
+            details=activity_in.details
+        )
+        
+        self.db.add(db_activity)
+        await self.db.commit()
+        await self.db.refresh(db_activity)
+        
+        return ClientPortalActivityResponse.model_validate(db_activity)
+
+    async def get_notifications(
+        self, 
+        user_id: int, 
+        page: int = 1, 
+        size: int = 20
+    ) -> Tuple[List[NotificationResponse], int]:
+        \"\"\"Get paginated list of notifications for a user.\"\"\"
+        # Validate inputs
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError(\"user_id must be a positive integer\")
+        if not isinstance(page, int) or page <= 0:
+            raise ValueError(\"page must be a positive integer\")
+        if not isinstance(size, int) or size <= 0:
+            raise ValueError(\"size must be a positive integer\")
+            
+        logger.info(\"fetching_notifications\", user_id=user_id, page=page, size=size)
+        
+        if size > 100:
+            size = 100
+            logger.warning(\"pagination_size_exceeded\", requested_size=size, enforced_size=100)
+        
+        offset = (page - 1) * size
+        
+        stmt = select(Notification).where(Notification.user_id == user_id)
+        stmt = stmt.order_by(Notification.created_at.desc())
+        stmt = stmt.offset(offset).limit(size)
+        
+        result = await self.db.execute(stmt)
+        notifications = result.scalars().all()
+        
+        count_stmt = select(sql_func.count()).select_from(Notification).where(Notification.user_id == user_id)
+        total_result = await self.db.execute(count_stmt)
+        total = total_result.scalar_one()
+        
+        return [
+            NotificationResponse.model_validate(notification) for notification in notifications
+        ], total
+
+    async def mark_notification_as_read(self, notification_id: int, user_id: int) -> NotificationResponse:
+        \"\"\"Mark a specific notification as read.\"\"\"
+        # Validate inputs
+        if not isinstance(notification_id, int) or notification_id <= 0:
+            raise ValueError(\"notification_id must be a positive integer\")
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError(\"user_id must be a positive integer\")
+            
+        logger.info(\"marking_notification_read\", notification_id=notification_id, user_id=user_id)
+        
+        stmt = update(Notification).where(
+            Notification.id == notification_id,
+            Notification.user_id == user_id
+        ).values(is_read=True, read_at=sql_func.now())
+        
+        result = await self.db.execute(stmt)
+        await self.db.commit()
+        
+        if result.rowcount == 0:
+            raise NotFoundError(detail=\"Notification not found or access denied\", error_code=\"NOTIFICATION_001\")
+        
+        # Fetch updated record
+        stmt = select(Notification).where(Notification.id == notification_id)
+        result = await self.db.execute(stmt)
+        notification = result.scalar_one_or_none()
+        
+        if not notification:
+            raise NotFoundError(detail=\"Failed to fetch updated notification\", error_code=\"NOTIFICATION_002\")
+            
+        return NotificationResponse.model_validate(notification)
+
+    async def mark_all_notifications_as_read(self, user_id: int) -> int:
+        \"\"\"Mark all notifications for a user as read.\"\"\"
+        # Validate inputs
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError(\"user_id must be a positive integer\")
+            
+        logger.info(\"marking_all_notifications_read\", user_id=user_id)
+        
+        stmt = update(Notification).where(
+            Notification.user_id == user_id,
+            Notification.is_read == False
+        ).values(is_read=True, read_at=sql_func.now())
+        
+        result = await self.db.execute(stmt)
+        await self.db.commit()
+        
+        return result.rowcount
+
+    async def get_or_create_user_preference(self, user_id: int) -> UserPreferenceResponse:
+        \"\"\"Get existing preference or create default one.\"\"\"
+        # Validate inputs
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError(\"user_id must be a positive integer\")
+            
+        logger.info(\"fetching_user_preference\", user_id=user_id)
+        
+        stmt = select(UserPreference).where(UserPreference.user_id == user_id)
+        result = await self.db.execute(stmt)
+        preference = result.scalar_one_or_none()
+        
+        if not preference:
+            logger.info(\"creating_default_user_preference\", user_id=user_id)
+            preference = UserPreference(user_id=user_id)
+            self.db.add(preference)
+            await self.db.commit()
+            await self.db.refresh(preference)
+        
+        return UserPreferenceResponse.model_validate(preference)
+
+    async def update_user_preference(
+        self, 
+        user_id: int, 
+        preference_update: UserPreferenceUpdate
+    ) -> UserPreferenceResponse:
+        \"\"\"Update user's portal preferences.\"\"\"
+        # Validate inputs
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError(\"user_id must be a positive integer\")
+            
+        logger.info(\"updating_user_preference\", user_id=user_id)
+        
+        stmt = select(UserPreference).where(UserPreference.user_id == user_id)
+        result = await self.db.execute(stmt)
+        preference = result.scalar_one_or_none()
+        
+        if not preference:
+            logger.info(\"creating_new_user_preference\", user_id=user_id)
+            preference = UserPreference(user_id=user_id, **preference_update.model_dump(exclude_unset=True))
+            self.db.add(preference)
+        else:
+            for field, value in preference_update.model_dump(exclude_unset=True).items():
+                setattr(preference, field, value)
+        
+        await self.db.commit()
+        await self.db.refresh(preference)
+        
+        return UserPreferenceResponse.model_validate(preference)
+
+    async def get_client_dashboard(self, user_id: int) -> ClientDashboardResponse:
+        \"\"\"Get client dashboard data.\"\"\"
+        # Validate inputs
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError(\"user_id must be a positive integer\")
+            
+        logger.info(\"fetching_client_dashboard\", user_id=user_id)
+        
+        # Placeholder implementation - would integrate with application/document services
+        dashboard_data = {
+            \"pipeline_summary\": {\"draft\": 1, \"submitted\": 2},
+            \"flagged_files_count\": 0,
+            \"recent_activity_feed\": [{\"type\": \"document_uploaded\", \"timestamp\": \"2023-01-01T00:00:00Z\"}],
+            \"quick_actions\": [\"upload_document\", \"message_broker\"]
+        }
+        
+        return ClientDashboardResponse(**dashboard_data)
+
+    async def get_broker_dashboard(self, user_id: int) -> BrokerDashboardResponse:
+        \"\"\"Get broker dashboard data.\"\"\"
+        # Validate inputs
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError(\"user_id must be a positive integer\")
+            
+        logger.info(\"fetching_broker_dashboard\", user_id=user_id)
+        
+        # Placeholder implementation - would integrate with application/document services
+        dashboard_data = {
+            \"pipeline_summary\": {\"draft\": 5, \"in_review\": 3},
+            \"flagged_files_count\": 2,
+            \"recent_activity_feed\": [{\"type\": \"status_changed\", \"timestamp\": \"2023-01-01T00:00:00Z\"}],
+            \"quick_actions\": [\"create_application\", \"send_request\"]
+        }
+        
+        return BrokerDashboardResponse(**dashboard_data)"}

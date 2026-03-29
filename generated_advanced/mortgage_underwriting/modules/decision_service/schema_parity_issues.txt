@@ -1,0 +1,1 @@
+DecisionRecordResponse: has extra fields ['application_id', 'audit_trail', 'cmhc_required', 'confidence_score', 'created_at', 'decision', 'exceptions', 'gds_ratio', 'id', 'ltv_ratio', 'policy_flags', 'stress_test_rate', 'tds_ratio', 'updated_at']

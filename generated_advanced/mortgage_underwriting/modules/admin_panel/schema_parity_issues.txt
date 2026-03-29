@@ -1,0 +1,1 @@
+AuditLogResponse: has extra fields ['action', 'created_at', 'entity_id', 'entity_type', 'id', 'ip_address', 'new_value', 'old_value', 'user_agent', 'user_id']

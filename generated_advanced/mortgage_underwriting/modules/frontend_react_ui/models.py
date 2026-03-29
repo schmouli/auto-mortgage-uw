@@ -1,0 +1,18 @@
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Numeric, Boolean, Text
+from sqlalchemy.orm import relationship, Mapped, mapped_column
+from sqlalchemy.sql import func
+from decimal import Decimal
+from mortgage_underwriting.common.database import Base
+
+class MortgageApplication(Base):
+    __tablename__ = "mortgage_applications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    client_id: Mapped[int] = mapped_column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    purchase_price: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)  # FIXED: Use Decimal for financial values
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())  # FIXED: Added timezone=True
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())  # FIXED: Added timezone=True
+
+    # Relationships
+    client: Mapped["Client"] = relationship("Client", back_populates="applications")

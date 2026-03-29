@@ -1,0 +1,2 @@
+UnderwritingResultResponse: has extra fields ['application_id', 'client_id', 'cmhc_premium_amount', 'cmhc_premium_percent', 'cmhc_required', 'conditions', 'created_at', 'decision', 'decline_reasons', 'gds_ratio', 'id', 'ltv_ratio', 'max_mortgage', 'qualifies', 'qualifying_rate', 'stress_test_passed', 'tds_ratio', 'updated_at']
+UnderwritingOverrideResponse: has extra fields ['admin_user_id', 'created_at', 'id', 'reason', 'result_id']

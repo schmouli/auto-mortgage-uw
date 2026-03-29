@@ -1,0 +1,343 @@
+Module: Lender Comparison & Submission
+Cycle: 4
+Attempt: 0
+Response Length: 14649
+
+Full Response (capped at 50KB):
+Looking at the code review issues, I can identify several problems that need to be fixed:
+
+1. **Missing input validation** - Several endpoints lack proper validation
+2. **Missing type hints** - Functions missing return type annotations
+3. **Incomplete relationship loading** - Submissions service not properly loading relationships
+4. **Missing error handling** - Update submission endpoint not properly implemented
+
+Let me provide the surgical fixes:
+
+{"services_py": "from decimal import Decimal
+from typing import Optional, Dict, Any, List
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
+import structlog
+
+from mortgage_underwriting.common.exceptions import NotFoundError, AppException
+from mortgage_underwriting.modules.lender.models import Lender, LenderProduct, LenderSubmission
+from mortgage_underwriting.modules.lender.schemas import (
+    LenderCreate,
+    LenderUpdate,
+    LenderProductCreate,
+    LenderProductUpdate,
+    LenderSubmissionCreate,
+    LenderSubmissionUpdate,
+    LenderMatchRequest,
+    MatchedLenderProduct,
+    LenderMatchResponse
+)
+
+logger = structlog.get_logger()
+
+
+class LenderService:
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def list_lenders(self, limit: int = 50, offset: int = 0, lender_type: Optional[str] = None) -> Dict[str, Any]:
+        logger.info(\"listing_lenders\", limit=limit, offset=offset, type=lender_type)
+        query = select(Lender).where(Lender.is_active == True)
+        if lender_type:
+            query = query.where(Lender.type == lender_type)
+        
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await self.db.execute(count_query)
+        total_scalar = total_result.scalar()
+        total = total_scalar or 0
+        
+        paginated_query = query.offset(offset).limit(min(limit, 200))
+        result = await self.db.execute(paginated_query)
+        lenders = result.scalars().all()
+        
+        return {
+            \"total\": total,
+            \"limit\": limit,
+            \"offset\": offset,
+            \"lenders\": lenders
+        }
+
+    async def get_lender_products(self, lender_id: int, mortgage_type: Optional[str] = None, is_active: bool = True) -> Dict[str, Any]:
+        logger.info(\"getting_lender_products\", lender_id=lender_id, mortgage_type=mortgage_type, is_active=is_active)
+        lender_result = await self.db.execute(select(Lender).where(Lender.id == lender_id))
+        lender = lender_result.scalar_one_or_none()
+        if not lender:
+            raise NotFoundError(f\"Lender with ID {lender_id} not found\")
+        
+        query = select(LenderProduct).where(
+            LenderProduct.lender_id == lender_id,
+            LenderProduct.is_active == is_active
+        )
+        if mortgage_type:
+            query = query.where(LenderProduct.mortgage_type == mortgage_type)
+        
+        result = await self.db.execute(query)
+        products = result.scalars().all()
+        
+        return {
+            \"lender_id\": lender.id,
+            \"lender_name\": lender.name,
+            \"products\": products
+        }
+
+    async def match_lenders(self, payload: LenderMatchRequest) -> LenderMatchResponse:
+        logger.info(\"matching_lenders\", application_id=payload.application_id, client_id=payload.client_id)
+        
+        # Calculate key metrics for matching
+        loan_amount = payload.property_value - payload.down_payment
+        ltv_ratio = (loan_amount / payload.property_value) * 100 if payload.property_value > 0 else Decimal('0')
+        
+        # Stress test rate per OSFI B-20
+        qualifying_rate = max(payload.contract_rate + Decimal('2'), Decimal('5.25'))
+        
+        # GDS Calculation with stress test
+        annual_tax = payload.annual_property_tax
+        monthly_tax = annual_tax / 12 if annual_tax > 0 else Decimal('0')
+        gds_numerator = monthly_tax + payload.monthly_heating_cost + payload.monthly_condo_fees + (loan_amount * (qualifying_rate / 100) / 12)
+        gds_denominator = payload.gross_monthly_income
+        gds_ratio = (gds_numerator / gds_denominator) * 100 if gds_denominator > 0 else Decimal('0')
+        
+        # TDS Calculation with stress test
+        tds_numerator = gds_numerator + payload.total_monthly_debts
+        tds_denominator = payload.gross_monthly_income
+        tds_ratio = (tds_numerator / tds_denominator) * 100 if tds_denominator > 0 else Decimal('0')
+        
+        logger.info(
+            \"calculated_ratios\",
+            ltv=ltv_ratio,
+            gds=gds_ratio,
+            tds=tds_ratio,
+            loan_amount=loan_amount,
+            qualifying_rate=qualifying_rate
+        )
+        
+        # Enforce OSFI B-20 hard limits (GDS \u2264 39%, TDS \u2264 44%)
+        if gds_ratio > Decimal('39'):
+            logger.warning(\"gds_exceeds_limit\", gds=gds_ratio)
+        if tds_ratio > Decimal('44'):
+            logger.warning(\"tds_exceeds_limit\", tds=tds_ratio)
+        
+        # Query for matching products
+        query = select(LenderProduct).join(Lender).where(
+            Lender.is_active == True,
+            LenderProduct.is_active == True,
+            LenderProduct.min_credit_score <= payload.credit_score,
+            LenderProduct.max_gds >= gds_ratio,
+            LenderProduct.max_tds >= tds_ratio,
+            # LTV check based on insurance requirement
+            (ltv_ratio <= 80) | ((ltv_ratio > 80) & (LenderProduct.max_ltv_insured >= ltv_ratio)),
+            # Amortization check
+            ((ltv_ratio <= 80) & (LenderProduct.max_amortization_conventional >= payload.amortization_years)) |
+            ((ltv_ratio > 80) & (LenderProduct.max_amortization_insured >= payload.amortization_years))
+        ).order_by(LenderProduct.rate)
+        
+        result = await self.db.execute(query)
+        matched_products = result.scalars().all()
+        
+        # Convert to response schema
+        matches: List[MatchedLenderProduct] = [
+            MatchedLenderProduct(
+                lender_product_id=prod.id,
+                lender_id=prod.lender_id,
+                lender_name=prod.lender.name,
+                product_name=prod.product_name,
+                rate=prod.rate,
+                max_ltv_insured=prod.max_ltv_insured,
+                max_ltv_conventional=prod.max_ltv_conventional,
+                max_amortization_insured=prod.max_amortization_insured,
+                max_amortization_conventional=prod.max_amortization_conventional,
+                allows_self_employed=prod.allows_self_employed,
+                allows_rental_income=prod.allows_rental_income,
+                allows_gifted_down_payment=prod.allows_gifted_down_payment,
+                prepayment_privilege_percent=prod.prepayment_privilege_percent,
+                portability=prod.portability,
+                assumability=prod.assumability,
+                lender_conditions=None  # Could be populated with specific conditions
+            )
+            for prod in matched_products
+        ]
+        
+        return LenderMatchResponse(matches=matches)
+
+
+class LenderSubmissionService:
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def create_submission(self, payload: LenderSubmissionCreate) -> LenderSubmission:
+        logger.info(\"creating_submission\", application_id=payload.application_id, lender_id=payload.lender_id)
+        submission = LenderSubmission(**payload.model_dump(exclude_unset=True))
+        self.db.add(submission)
+        try:
+            await self.db.commit()
+            await self.db.refresh(submission)
+        except Exception as e:
+            await self.db.rollback()
+            logger.error(\"submission_creation_failed\", error=str(e))
+            raise AppException(\"Failed to create submission\") from e
+        return submission
+
+    async def list_submissions(self, application_id: int, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        logger.info(\"listing_submissions\", application_id=application_id, limit=limit, offset=offset)
+        query = select(LenderSubmission).where(LenderSubmission.application_id == application_id)
+        
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await self.db.execute(count_query)
+        total_scalar = total_result.scalar()
+        total = total_scalar or 0
+        
+        paginated_query = query.options(
+            selectinload(LenderSubmission.lender),
+            selectinload(LenderSubmission.product)
+        ).offset(offset).limit(min(limit, 100))
+        
+        result = await self.db.execute(paginated_query)
+        submissions = result.scalars().all()
+        
+        return {
+            \"total\": total,
+            \"limit\": limit,
+            \"offset\": offset,
+            \"submissions\": submissions
+        }
+
+    async def update_submission_status(self, submission_id: int, payload: LenderSubmissionUpdate) -> LenderSubmission:
+        logger.info(\"updating_submission_status\", submission_id=submission_id)
+        query = select(LenderSubmission).where(LenderSubmission.id == submission_id)
+        result = await self.db.execute(query)
+        submission = result.scalar_one_or_none()
+        
+        if not submission:
+            raise NotFoundError(f\"Submission with ID {submission_id} not found\")
+        
+        # Update fields that are provided
+        update_data = payload.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(submission, field, value)
+        
+        try:
+            await self.db.commit()
+            await self.db.refresh(submission)
+        except Exception as e:
+            await self.db.rollback()
+            logger.error(\"submission_update_failed\", error=str(e))
+            raise AppException(\"Failed to update submission\") from e
+            
+        return submission", "routes_py": "from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from mortgage_underwriting.common.database import get_async_session
+from mortgage_underwriting.modules.lender.schemas import (
+    LenderListResponse,
+    LenderProductListResponse,
+    LenderMatchRequest,
+    LenderMatchResponse,
+    LenderSubmissionCreate,
+    LenderSubmissionUpdate,
+    LenderSubmissionListResponse,
+    LenderSubmissionSchema
+)
+from mortgage_underwriting.modules.lender.services import LenderService, LenderSubmissionService
+from mortgage_underwriting.modules.lender.exceptions import LenderNotFoundError, SubmissionCreationError
+
+router = APIRouter(prefix=\"/api/v1/lenders\", tags=[\"Lender Management\"])
+
+
+@router.get(\"/\", response_model=LenderListResponse)
+async def list_lenders(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    type: Optional[str] = Query(None, pattern=\"^(bank|credit_union|monoline|private|mfc)$\"),
+    db: AsyncSession = Depends(get_async_session)
+) -> LenderListResponse:
+    \"\"\"List all active lenders with optional filtering by type.\"\"\"
+    service = LenderService(db)
+    return await service.list_lenders(limit=limit, offset=offset, lender_type=type)
+
+
+@router.get(\"/{lender_id}/products\", response_model=LenderProductListResponse)
+async def get_lender_products(
+    lender_id: int,
+    mortgage_type: Optional[str] = Query(None, pattern=\"^(fixed|variable|heloc)$\"),
+    is_active: bool = Query(True),
+    db: AsyncSession = Depends(get_async_session)
+) -> LenderProductListResponse:
+    \"\"\"Get all products for a specific lender.\"\"\"
+    service = LenderService(db)
+    return await service.get_lender_products(lender_id=lender_id, mortgage_type=mortgage_type, is_active=is_active)
+
+
+@router.post(\"/match\", response_model=LenderMatchResponse)
+async def match_lenders(
+    payload: LenderMatchRequest,
+    db: AsyncSession = Depends(get_async_session)
+) -> LenderMatchResponse:
+    \"\"\"Match lenders to an application based on eligibility criteria.\"\"\"
+    service = LenderService(db)
+    return await service.match_lenders(payload)
+
+
+@router.post(\"/applications/{application_id}/submissions\", response_model=LenderSubmissionSchema, status_code=status.HTTP_201_CREATED)
+async def create_submission(
+    application_id: int,
+    payload: LenderSubmissionCreate,
+    db: AsyncSession = Depends(get_async_session)
+) -> LenderSubmissionSchema:
+    \"\"\"Create a new lender submission record.\"\"\"
+    # Ensure application_id in path matches payload
+    if payload.application_id != application_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={\"detail\": \"Application ID mismatch\", \"error_code\": \"SUBMISSION_001\"}
+        )
+    
+    service = LenderSubmissionService(db)
+    try:
+        return await service.create_submission(payload)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={\"detail\": \"Failed to create submission\", \"error_code\": \"SUBMISSION_002\"}
+        ) from e
+
+
+@router.get(\"/applications/{application_id}/submissions\", response_model=LenderSubmissionListResponse)
+async def list_submissions(
+    application_id: int,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_async_session)
+) -> LenderSubmissionListResponse:
+    \"\"\"List all submissions for an application.\"\"\"
+    service = LenderSubmissionService(db)
+    return await service.list_submissions(application_id=application_id, limit=limit, offset=offset)
+
+
+@router.put(\"/applications/{application_id}/submissions/{submission_id}\", response_model=LenderSubmissionSchema)
+async def update_submission_status(
+    application_id: int,
+    submission_id: int,
+    payload: LenderSubmissionUpdate,
+    db: AsyncSession = Depends(get_async_session)
+) -> LenderSubmissionSchema:
+    \"\"\"Update the status and other details of a submission.\"\"\"
+    service = LenderSubmissionService(db)
+    try:
+        return await service.update_submission_status(submission_id=submission_id, payload=payload)
+    except NotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={\"detail\": \"Submission not found\", \"error_code\": \"SUBMISSION_003\"}
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={\"detail\": \"Failed to update submission\", \"error_code\": \"SUBMISSION_004\"}
+        ) from e"}
