@@ -1,0 +1,7 @@
+Module: Frontend React UI
+Attempt: 0
+Response Length: 31
+
+Full Response (capped at 50KB):
+{"error": "unable to generate"}
+

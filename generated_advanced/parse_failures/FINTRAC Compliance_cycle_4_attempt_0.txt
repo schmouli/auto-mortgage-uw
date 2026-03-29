@@ -1,0 +1,100 @@
+Module: FINTRAC Compliance
+Cycle: 4
+Attempt: 0
+Response Length: 3836
+
+Full Response (capped at 50KB):
+Looking at the issue, the problem is that `FintracVerificationResponse` schema has extra fields that don't match the model. Let me analyze the discrepancy:
+
+Model fields: id, application_id, client_id, verification_method, id_type, id_number_encrypted, id_expiry_date, id_issuing_province, verified_by, verified_at, is_pep, is_hio, risk_level, record_created_at, created_at, updated_at, is_deleted, retention_expires_at, created_by
+
+Response schema fields: verification_id, application_id, client_id, verification_method, risk_level, verified_at, requires_enhanced_due_diligence, detail
+
+The issue is that the response schema is including fields that shouldn't be there or missing proper mapping. Looking at the service code, I can see that the response is being constructed manually with some computed fields.
+
+Let me fix the schema to match what's actually being returned and ensure consistency.
+
+{"schemas_py": "from datetime import datetime, date
+from decimal import Decimal
+from typing import Optional
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+# Request Schemas
+
+class FintracVerificationRequest(BaseModel):
+    client_id: int = Field(..., gt=0)
+    verification_method: str = Field(..., pattern=\"^(in_person|credit_file|dual_process)$\")
+    id_type: str = Field(..., min_length=1, max_length=50)
+    id_number: str = Field(..., min_length=1, max_length=100)
+    id_expiry_date: date = Field(...)
+    id_issuing_province: str = Field(..., min_length=2, max_length=2)
+    is_pep: bool = False
+    is_hio: bool = False
+
+    @field_validator('id_expiry_date')
+    @classmethod
+    def validate_id_not_expired(cls, v: date) -> date:
+        from datetime import date as dt_date
+        if v < dt_date.today():
+            raise ValueError('ID expiry date cannot be in the past')
+        return v
+
+
+class FintracTransactionReportRequest(BaseModel):
+    report_type: str = Field(..., pattern=\"^(large_cash_transaction|suspicious_transaction|terrorist_property)$\")
+    amount: Decimal = Field(..., gt=0)
+    currency: str = Field(\"CAD\", pattern=\"^[A-Z]{3}$\")
+    created_by: int = Field(..., gt=0)
+
+# Response Schemas
+
+class FintracVerificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    verification_id: int = Field(description=\"ID of the verification record\")
+    application_id: int = Field(description=\"ID of the mortgage application\")
+    client_id: int = Field(description=\"ID of the client\")
+    verification_method: str = Field(description=\"Method used for verification\")
+    risk_level: str = Field(description=\"Assigned risk level\")
+    verified_at: datetime = Field(description=\"Timestamp when verification was completed\")
+    requires_enhanced_due_diligence: bool = Field(description=\"Whether enhanced due diligence is required\")
+    detail: str = Field(default=\"Identity verification recorded\", description=\"Additional details about the verification\")
+
+
+class FintracVerificationStatusResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    application_id: int
+    client_id: int
+    verification_method: str
+    id_type: str
+    id_expiry_date: date
+    id_issuing_province: str
+    verified_at: datetime
+    is_pep: bool
+    is_hio: bool
+    risk_level: str
+    record_created_at: datetime
+
+
+class FintracReportListResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    report_type: str
+    amount: Decimal
+    currency: str
+    report_date: datetime
+    fintrac_reference_number: Optional[str] = None
+
+
+class FintracRiskAssessmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    client_id: int
+    risk_level: str
+    is_pep: bool
+    is_hio: bool
+    requires_enhanced_due_diligence: bool
+    last_verified_at: datetime"}

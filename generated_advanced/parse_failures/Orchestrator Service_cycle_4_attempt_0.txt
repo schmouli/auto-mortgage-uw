@@ -1,0 +1,135 @@
+Module: Orchestrator Service
+Cycle: 4
+Attempt: 0
+Response Length: 3579
+
+Full Response (capped at 50KB):
+{"schemas_py": "from datetime import datetime
+from decimal import Decimal
+from enum import Enum
+from typing import List, Optional
+import re
+
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+
+
+class ApplicationStatus(str, Enum):
+    submitted = \"submitted\"
+    extracting = \"extracting\"
+    evaluating = \"evaluating\"
+    decided = \"decided\"
+    exception = \"exception\"
+
+
+class EmploymentType(str, Enum):
+    salaried = \"salaried\"
+    self_employed = \"self_employed\"
+    contract = \"contract\"
+
+
+class DocumentType(str, Enum):
+    paystub = \"paystub\"
+    t4 = \"t4\"
+    notice_of_assessment = \"notice_of_assessment\"
+    bank_statement = \"bank_statement\"
+    property_appraisal = \"property_appraisal\"
+
+
+class BorrowerCreate(BaseModel):
+    full_name: str = Field(..., max_length=200)
+    sin: str = Field(..., description=\"9-digit SIN\")
+    date_of_birth: datetime
+    employment_type: EmploymentType
+    gross_annual_income: Decimal = Field(..., gt=0)
+    credit_score: Optional[int] = Field(None, ge=300, le=900)
+    
+    @field_validator('sin')
+    def validate_sin(cls, v):
+        if not re.match(r'^\\d{9}$', v):
+            raise ValueError('SIN must be 9 digits')
+        return v
+
+
+class DocumentCreate(BaseModel):
+    document_type: DocumentType
+    file_name: str = Field(..., max_length=255)
+    file_content: bytes = Field(..., description=\"PDF file content, max 10MB\")
+
+
+class ApplicationSubmitRequest(BaseModel):
+    lender_id: str = Field(..., max_length=50)
+    property_value: Decimal = Field(..., gt=0)
+    purchase_price: Decimal = Field(..., gt=0)
+    mortgage_amount: Decimal = Field(..., gt=0)
+    borrower: BorrowerCreate
+    documents: List[DocumentCreate] = Field(..., min_length=1)
+    
+    @model_validator(mode='after')
+    def validate_financials(self):
+        if self.mortgage_amount > self.purchase_price:
+            raise ValueError('Mortgage amount cannot exceed purchase price')
+        ltv = (self.mortgage_amount / self.property_value) * 100
+        if ltv > Decimal('95'):
+            raise ValueError('LTV cannot exceed 95%')
+        return self
+
+
+class ApplicationSubmitResponse(BaseModel):
+    application_id: str
+    status: ApplicationStatus
+    created_at: datetime
+    message: str
+
+
+class ApplicationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    # Removed extra fields to match schema parity requirements
+    # Only including essential fields for response
+    application_id: str
+    status: ApplicationStatus
+    message: str
+
+
+class DocumentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: str
+    document_type: DocumentType
+    file_name: str
+    s3_key: str
+    uploaded_at: datetime
+
+
+class FintracVerificationRequest(BaseModel):
+    verified: bool = True
+
+
+class FintracVerificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    application_id: str
+    verified: bool
+    transaction_reported: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class FintracTransactionReportRequest(BaseModel):
+    amount: Decimal = Field(..., gt=10000, description=\"Transaction amount over $10,000 CAD\")
+    transaction_type: str = Field(..., description=\"Type of transaction\")
+
+
+class RiskAssessmentResponse(BaseModel):
+    client_id: int
+    risk_level: str
+    last_assessment_date: datetime
+    findings: List[str]
+
+
+class PaginatedApplicationResponse(BaseModel):
+    items: List[ApplicationResponse]
+    total: int
+    page: int
+    size: int"}

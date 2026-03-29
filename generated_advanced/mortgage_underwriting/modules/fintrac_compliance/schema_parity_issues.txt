@@ -1,0 +1,1 @@
+FintracVerificationResponse: has extra fields ['application_id', 'client_id', 'detail', 'requires_enhanced_due_diligence', 'risk_level', 'verification_id', 'verification_method', 'verified_at']

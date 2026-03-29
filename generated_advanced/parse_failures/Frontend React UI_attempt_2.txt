@@ -1,0 +1,7 @@
+Module: Frontend React UI
+Attempt: 2
+Response Length: 25
+
+Full Response (capped at 50KB):
+[Timeout: Model too slow]
+

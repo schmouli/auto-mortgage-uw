@@ -1,0 +1,760 @@
+Module: Testing Suite
+Cycle: 5
+Attempt: 0
+Response Length: 32387
+
+Full Response (capped at 50KB):
+Looking at the security review issues, I need to identify and fix security-related problems in the testing suite code. Based on the generated code and common security patterns, here are the main issues I can identify:
+
+1. **Missing Input Validation**: The schemas lack comprehensive validation for sensitive fields
+2. **Insecure Error Handling**: Generic exception handling that could leak internal details
+3. **Missing Security Context**: No correlation_id tracking or security logging
+4. **Potential Data Exposure**: Log output and error messages might contain sensitive data
+
+Let me provide surgical fixes for these security issues:
+
+{"schemas_py": "from datetime import datetime
+from decimal import Decimal
+from typing import Optional, Dict, Any
+
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+import re
+
+# --- Test Run Schemas ---
+
+class TestRunBase(BaseModel):
+    module_name: str = Field(..., max_length=100)
+    test_suite_type: str = Field(..., pattern=\"^(unit|integration|e2e)$\")
+    status: str = Field(..., pattern=\"^(passed|failed|running)$\")
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    duration_ms: Optional[int] = Field(None, ge=0, le=3600000)  # Max 1 hour
+    total_tests: int = Field(0, ge=0, le=10000)
+    passed_tests: int = Field(0, ge=0, le=10000)
+    failed_tests: int = Field(0, ge=0, le=10000)
+    skipped_tests: int = Field(0, ge=0, le=10000)
+    coverage_percentage: Optional[Decimal] = Field(None, ge=0, le=100)
+    log_output: Optional[str] = Field(None, max_length=10000)  # Limit log size
+    triggered_by: Optional[int] = None
+    metadata_json: Optional[Dict[str, Any]] = None
+
+    @field_validator('module_name')
+    @classmethod
+    def validate_module_name(cls, v):
+        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+            raise ValueError('module_name contains invalid characters')
+        return v
+
+    @field_validator('finished_at')
+    @classmethod
+    def finish_not_before_start(cls, v, info):
+        start = info.data.get('started_at')
+        if v and start and v < start:
+            raise ValueError('finish time cannot be before start time')
+        return v
+
+    @field_validator('log_output')
+    @classmethod
+    def sanitize_log_output(cls, v):
+        # Remove potentially sensitive information from logs
+        if v:
+            # This is a simplified sanitization - in practice would be more robust
+            sensitive_patterns = [
+                r'\\b\\d{3}-\\d{3}-\\d{3}\\b',  # SIN-like patterns
+                r'\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b',  # Credit card patterns
+            ]
+            for pattern in sensitive_patterns:
+                v = re.sub(pattern, '[REDACTED]', v)
+        return v
+
+
+class TestRunCreate(TestRunBase):
+    pass
+
+
+class TestRunUpdate(BaseModel):
+    status: Optional[str] = Field(None, pattern=\"^(passed|failed|running)$\")
+    finished_at: Optional[datetime] = None
+    duration_ms: Optional[int] = Field(None, ge=0, le=3600000)
+    total_tests: Optional[int] = Field(None, ge=0, le=10000)
+    passed_tests: Optional[int] = Field(None, ge=0, le=10000)
+    failed_tests: Optional[int] = Field(None, ge=0, le=10000)
+    skipped_tests: Optional[int] = Field(None, ge=0, le=10000)
+    coverage_percentage: Optional[Decimal] = Field(None, ge=0, le=100)
+    log_output: Optional[str] = Field(None, max_length=10000)
+
+
+class TestRunResponse(TestRunBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    created_at: datetime
+
+
+# --- Test Case Schemas ---
+
+
+class TestCaseBase(BaseModel):
+    run_id: int = Field(..., gt=0)
+    test_name: str = Field(..., max_length=255)
+    test_class: Optional[str] = Field(None, max_length=255)
+    file_path: Optional[str] = Field(None, max_length=500)
+    status: str = Field(..., pattern=\"^(passed|failed|skipped|error)$\")
+    duration_ms: int = Field(0, ge=0, le=300000)  # Max 5 minutes
+    error_message: Optional[str] = Field(None, max_length=5000)
+    stack_trace: Optional[str] = Field(None, max_length=10000)
+    assertion_details: Optional[Dict[str, Any]] = None
+    compliance_tags: Optional[Dict[str, str]] = None
+
+    @field_validator('test_name')
+    @classmethod
+    def validate_test_name(cls, v):
+        if not re.match(r'^[a-zA-Z0-9_.:-]+$', v):
+            raise ValueError('test_name contains invalid characters')
+        return v
+
+    @field_validator('error_message', 'stack_trace')
+    @classmethod
+    def sanitize_error_content(cls, v):
+        # Sanitize sensitive information from error messages
+        if v:
+            # This is a simplified sanitization - in practice would be more robust
+            sensitive_patterns = [
+                r'\\b\\d{3}-\\d{3}-\\d{3}\\b',  # SIN-like patterns
+                r'[A-Za-z0-9+/]{40,}',  # Long encoded strings (potential tokens)
+            ]
+            for pattern in sensitive_patterns:
+                v = re.sub(pattern, '[REDACTED]', v)
+        return v
+
+
+class TestCaseCreate(TestCaseBase):
+    pass
+
+
+class TestCaseUpdate(BaseModel):
+    status: Optional[str] = Field(None, pattern=\"^(passed|failed|skipped|error)$\")
+    duration_ms: Optional[int] = Field(None, ge=0, le=300000)
+    error_message: Optional[str] = Field(None, max_length=5000)
+    stack_trace: Optional[str] = Field(None, max_length=10000)
+    assertion_details: Optional[Dict[str, Any]] = None
+
+
+class TestCaseResponse(TestCaseBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    created_at: datetime
+
+
+# --- Coverage Report Schemas ---
+
+
+class TestCoverageReportBase(BaseModel):
+    module_name: str = Field(..., max_length=100)
+    reported_at: datetime
+    line_coverage_percent: Decimal = Field(..., ge=0, le=100)
+    branch_coverage_percent: Optional[Decimal] = Field(None, ge=0, le=100)
+    function_coverage_percent: Optional[Decimal] = Field(None, ge=0, le=100)
+    missed_lines: Optional[str] = Field(None, max_length=5000)
+    complexity_score: Optional[int] = Field(None, ge=0, le=1000)
+    issues_found: Optional[int] = Field(None, ge=0, le=10000)
+    security_findings: Optional[int] = Field(None, ge=0, le=1000)
+
+    @field_validator('module_name')
+    @classmethod
+    def validate_module_name(cls, v):
+        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+            raise ValueError('module_name contains invalid characters')
+        return v
+
+
+class TestCoverageReportCreate(TestCoverageReportBase):
+    pass
+
+
+class TestCoverageReportUpdate(BaseModel):
+    line_coverage_percent: Optional[Decimal] = Field(None, ge=0, le=100)
+    branch_coverage_percent: Optional[Decimal] = Field(None, ge=0, le=100)
+    function_coverage_percent: Optional[Decimal] = Field(None, ge=0, le=100)
+    missed_lines: Optional[str] = Field(None, max_length=5000)
+    complexity_score: Optional[int] = Field(None, ge=0, le=1000)
+    issues_found: Optional[int] = Field(None, ge=0, le=10000)
+    security_findings: Optional[int] = Field(None, ge=0, le=1000)
+
+
+class TestCoverageReportResponse(TestCoverageReportBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    created_at: datetime", "services_py": "from sqlalchemy.ext.asyncio import AsyncSession
+from typing import List, Optional
+import structlog
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from mortgage_underwriting.common.exceptions import NotFoundError
+from mortgage_underwriting.modules.testing.models import TestRun, TestCase, TestCoverageReport
+from mortgage_underwriting.modules.testing.schemas import (
+    TestRunCreate,
+    TestRunUpdate,
+    TestCaseCreate,
+    TestCaseUpdate,
+    TestCoverageReportCreate,
+    TestCoverageReportUpdate
+)
+from mortgage_underwriting.common.security import encrypt_pii  # Import for security context
+
+logger = structlog.get_logger()
+
+
+class TestRunService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def create_run(self, payload: TestRunCreate) -> TestRun:
+        correlation_id = str(uuid.uuid4())
+        logger.info(\"test_run_create\", 
+                   module=payload.module_name, 
+                   suite=payload.test_suite_type,
+                   correlation_id=correlation_id)
+        
+        # Validate that no sensitive data is being stored in log_output
+        if payload.log_output:
+            # Additional validation layer for sensitive data
+            if any(sensitive in payload.log_output.lower() for sensitive in ['password', 'token', 'secret']):
+                logger.warning(\"potential_sensitive_data_detected\", correlation_id=correlation_id)
+                raise ValueError(\"Log output may contain sensitive information\")
+        
+        instance = TestRun(**payload.model_dump(exclude_unset=True))
+        self.db.add(instance)
+        await self.db.commit()
+        await self.db.refresh(instance)
+        
+        logger.info(\"test_run_created_success\", 
+                   run_id=instance.id,
+                   correlation_id=correlation_id)
+        return instance
+
+    async def update_run(self, run_id: int, payload: TestRunUpdate) -> TestRun:
+        correlation_id = str(uuid.uuid4())
+        logger.info(\"test_run_update\", run_id=run_id, correlation_id=correlation_id)
+        
+        stmt = select(TestRun).where(TestRun.id == run_id)
+        result = await self.db.execute(stmt)
+        instance = result.scalar_one_or_none()
+        if not instance:
+            logger.warning(\"test_run_not_found\", run_id=run_id, correlation_id=correlation_id)
+            raise NotFoundError(f\"TestRun {run_id} not found\")
+            
+        for key, value in payload.model_dump(exclude_unset=True).items():
+            setattr(instance, key, value)
+            
+        await self.db.commit()
+        await self.db.refresh(instance)
+        
+        logger.info(\"test_run_updated_success\", run_id=run_id, correlation_id=correlation_id)
+        return instance
+
+    async def get_run(self, run_id: int) -> TestRun:
+        correlation_id = str(uuid.uuid4())
+        logger.debug(\"test_run_get\", run_id=run_id, correlation_id=correlation_id)
+        
+        stmt = select(TestRun).where(TestRun.id == run_id).options(selectinload(TestRun.test_cases))
+        result = await self.db.execute(stmt)
+        instance = result.scalar_one_or_none()
+        if not instance:
+            logger.warning(\"test_run_not_found\", run_id=run_id, correlation_id=correlation_id)
+            raise NotFoundError(f\"TestRun {run_id} not found\")
+            
+        logger.debug(\"test_run_retrieved\", run_id=run_id, correlation_id=correlation_id)
+        return instance
+
+    async def list_runs(self, limit: int = 50, offset: int = 0) -> List[TestRun]:
+        correlation_id = str(uuid.uuid4())
+        logger.debug(\"test_run_list\", limit=limit, offset=offset, correlation_id=correlation_id)
+        
+        # Security: Limit maximum page size
+        limit = min(limit, 100)
+        
+        stmt = select(TestRun).order_by(TestRun.started_at.desc()).limit(limit).offset(offset)
+        result = await self.db.execute(stmt)
+        
+        runs = list(result.scalars().all())
+        logger.debug(\"test_runs_listed\", count=len(runs), correlation_id=correlation_id)
+        return runs
+
+
+class TestCaseService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def create_case(self, payload: TestCaseCreate) -> TestCase:
+        correlation_id = str(uuid.uuid4())
+        logger.info(\"test_case_create\", 
+                   test_name=payload.test_name,
+                   correlation_id=correlation_id)
+        
+        # Security check: prevent storing sensitive error details
+        if payload.error_message and len(payload.error_message) > 5000:
+            logger.warning(\"error_message_too_long\", correlation_id=correlation_id)
+            payload.error_message = payload.error_message[:5000] + \"... [truncated]\"
+            
+        instance = TestCase(**payload.model_dump(exclude_unset=True))
+        self.db.add(instance)
+        await self.db.commit()
+        await self.db.refresh(instance)
+        
+        logger.info(\"test_case_created\", case_id=instance.id, correlation_id=correlation_id)
+        return instance
+
+    async def update_case(self, case_id: int, payload: TestCaseUpdate) -> TestCase:
+        correlation_id = str(uuid.uuid4())
+        logger.info(\"test_case_update\", case_id=case_id, correlation_id=correlation_id)
+        
+        stmt = select(TestCase).where(TestCase.id == case_id)
+        result = await self.db.execute(stmt)
+        instance = result.scalar_one_or_none()
+        if not instance:
+            logger.warning(\"test_case_not_found\", case_id=case_id, correlation_id=correlation_id)
+            raise NotFoundError(f\"TestCase {case_id} not found\")
+            
+        for key, value in payload.model_dump(exclude_unset=True).items():
+            setattr(instance, key, value)
+            
+        await self.db.commit()
+        await self.db.refresh(instance)
+        
+        logger.info(\"test_case_updated\", case_id=case_id, correlation_id=correlation_id)
+        return instance
+
+    async def get_case(self, case_id: int) -> TestCase:
+        correlation_id = str(uuid.uuid4())
+        logger.debug(\"test_case_get\", case_id=case_id, correlation_id=correlation_id)
+        
+        stmt = select(TestCase).where(TestCase.id == case_id)
+        result = await self.db.execute(stmt)
+        instance = result.scalar_one_or_none()
+        if not instance:
+            logger.warning(\"test_case_not_found\", case_id=case_id, correlation_id=correlation_id)
+            raise NotFoundError(f\"TestCase {case_id} not found\")
+            
+        logger.debug(\"test_case_retrieved\", case_id=case_id, correlation_id=correlation_id)
+        return instance
+
+    async def list_cases_for_run(self, run_id: int) -> List[TestCase]:
+        correlation_id = str(uuid.uuid4())
+        logger.debug(\"test_case_list_for_run\", run_id=run_id, correlation_id=correlation_id)
+        
+        stmt = select(TestCase).where(TestCase.run_id == run_id)
+        result = await self.db.execute(stmt)
+        
+        cases = list(result.scalars().all())
+        logger.debug(\"test_cases_listed_for_run\", run_id=run_id, count=len(cases), correlation_id=correlation_id)
+        return cases
+
+
+class TestCoverageReportService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def create_report(self, payload: TestCoverageReportCreate) -> TestCoverageReport:
+        correlation_id = str(uuid.uuid4())
+        logger.info(\"coverage_report_create\", 
+                   module=payload.module_name,
+                   correlation_id=correlation_id)
+        
+        instance = TestCoverageReport(**payload.model_dump(exclude_unset=True))
+        self.db.add(instance)
+        await self.db.commit()
+        await self.db.refresh(instance)
+        
+        logger.info(\"coverage_report_created\", 
+                   report_id=instance.id,
+                   module=payload.module_name,
+                   correlation_id=correlation_id)
+        return instance
+
+    async def update_report(self, report_id: int, payload: TestCoverageReportUpdate) -> TestCoverageReport:
+        correlation_id = str(uuid.uuid4())
+        logger.info(\"coverage_report_update\", report_id=report_id, correlation_id=correlation_id)
+        
+        stmt = select(TestCoverageReport).where(TestCoverageReport.id == report_id)
+        result = await self.db.execute(stmt)
+        instance = result.scalar_one_or_none()
+        if not instance:
+            logger.warning(\"coverage_report_not_found\", report_id=report_id, correlation_id=correlation_id)
+            raise NotFoundError(f\"TestCoverageReport {report_id} not found\")
+            
+        for key, value in payload.model_dump(exclude_unset=True).items():
+            setattr(instance, key, value)
+            
+        await self.db.commit()
+        await self.db.refresh(instance)
+        
+        logger.info(\"coverage_report_updated\", report_id=report_id, correlation_id=correlation_id)
+        return instance
+
+    async def get_latest_report(self, module_name: str) -> Optional[TestCoverageReport]:
+        correlation_id = str(uuid.uuid4())
+        logger.debug(\"coverage_report_get_latest\", module=module_name, correlation_id=correlation_id)
+        
+        stmt = (
+            select(TestCoverageReport)
+            .where(TestCoverageReport.module_name == module_name)
+            .order_by(TestCoverageReport.reported_at.desc())
+            .limit(1)
+        )
+        result = await self.db.execute(stmt)
+        report = result.scalar_one_or_none()
+        
+        if report:
+            logger.debug(\"latest_coverage_report_found\", 
+                        module=module_name, 
+                        report_id=report.id,
+                        correlation_id=correlation_id)
+        else:
+            logger.debug(\"no_coverage_report_found\", module=module_name, correlation_id=correlation_id)
+            
+        return report
+
+    async def list_reports(self, limit: int = 50, offset: int = 0) -> List[TestCoverageReport]:
+        correlation_id = str(uuid.uuid4())
+        logger.debug(\"coverage_report_list\", limit=limit, offset=offset, correlation_id=correlation_id)
+        
+        # Security: Limit maximum page size
+        limit = min(limit, 100)
+        
+        stmt = select(TestCoverageReport).order_by(TestCoverageReport.reported_at.desc()).limit(limit).offset(offset)
+        result = await self.db.execute(stmt)
+        
+        reports = list(result.scalars().all())
+        logger.debug(\"coverage_reports_listed\", count=len(reports), correlation_id=correlation_id)
+        return reports", "routes_py": "from sqlalchemy.ext.asyncio import AsyncSession
+from typing import List
+import uuid
+import structlog
+
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+
+from mortgage_underwriting.common.database import get_async_session
+from mortgage_underwriting.modules.testing.schemas import (
+    TestRunCreate,
+    TestRunUpdate,
+    TestRunResponse,
+    TestCaseCreate,
+    TestCaseUpdate,
+    TestCaseResponse,
+    TestCoverageReportCreate,
+    TestCoverageReportUpdate,
+    TestCoverageReportResponse
+)
+from mortgage_underwriting.modules.testing.services import TestRunService, TestCaseService, TestCoverageReportService
+from mortgage_underwriting.modules.testing.exceptions import (
+    TestRunCreationError,
+    TestRunUpdateError,
+    TestRunNotFoundError,
+    TestCaseCreationError,
+    TestCaseUpdateError,
+    TestCaseNotFoundError,
+    CoverageReportCreationError,
+    CoverageReportUpdateError,
+    CoverageReportNotFoundError
+)
+
+logger = structlog.get_logger()
+router = APIRouter(prefix=\"/api/v1/testing\", tags=[\"Testing Suite\"])
+
+
+@router.post(\"/runs\", response_model=TestRunResponse, status_code=status.HTTP_201_CREATED)
+async def create_test_run(
+    payload: TestRunCreate,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"Create a new test run record.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestRunService(db)
+    try:
+        result = await service.create_run(payload)
+        logger.info(\"test_run_api_created\", run_id=result.id, correlation_id=correlation_id)
+        return result
+    except ValueError as e:
+        logger.warning(\"test_run_validation_error\", error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail={\"error\": \"Validation failed\", \"type\": \"ValidationError\", \"correlation_id\": correlation_id}
+        )
+    except Exception as e:
+        logger.error(\"test_run_creation_failed\", error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.put(\"/runs/{run_id}\", response_model=TestRunResponse)
+async def update_test_run(
+    run_id: int,
+    payload: TestRunUpdate,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"Update an existing test run record.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestRunService(db)
+    try:
+        result = await service.update_run(run_id, payload)
+        logger.info(\"test_run_api_updated\", run_id=run_id, correlation_id=correlation_id)
+        return result
+    except TestRunNotFoundError:
+        logger.warning(\"test_run_not_found_api\", run_id=run_id, correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail={\"error\": \"Test run not found\", \"type\": \"TestRunNotFoundError\", \"correlation_id\": correlation_id}
+        )
+    except Exception as e:
+        logger.error(\"test_run_update_failed\", run_id=run_id, error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.get(\"/runs/{run_id}\", response_model=TestRunResponse)
+async def get_test_run(
+    run_id: int,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"Get a specific test run by ID.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestRunService(db)
+    try:
+        result = await service.get_run(run_id)
+        logger.info(\"test_run_api_retrieved\", run_id=run_id, correlation_id=correlation_id)
+        return result
+    except TestRunNotFoundError:
+        logger.warning(\"test_run_not_found_api\", run_id=run_id, correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail={\"error\": \"Test run not found\", \"type\": \"TestRunNotFoundError\", \"correlation_id\": correlation_id}
+        )
+    except Exception as e:
+        logger.error(\"test_run_retrieval_failed\", run_id=run_id, error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.get(\"/runs\", response_model=List[TestRunResponse])
+async def list_test_runs(
+    limit: int = Query(50, le=100),
+    offset: int = Query(0),
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"List recent test runs with pagination.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestRunService(db)
+    try:
+        results = await service.list_runs(limit=limit, offset=offset)
+        logger.info(\"test_runs_api_listed\", count=len(results), correlation_id=correlation_id)
+        return results
+    except Exception as e:
+        logger.error(\"test_runs_listing_failed\", error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.post(\"/cases\", response_model=TestCaseResponse, status_code=status.HTTP_201_CREATED)
+async def create_test_case(
+    payload: TestCaseCreate,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"Create a new test case result.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestCaseService(db)
+    try:
+        result = await service.create_case(payload)
+        logger.info(\"test_case_api_created\", case_id=result.id, correlation_id=correlation_id)
+        return result
+    except ValueError as e:
+        logger.warning(\"test_case_validation_error\", error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail={\"error\": \"Validation failed\", \"type\": \"ValidationError\", \"correlation_id\": correlation_id}
+        )
+    except Exception as e:
+        logger.error(\"test_case_creation_failed\", error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.put(\"/cases/{case_id}\", response_model=TestCaseResponse)
+async def update_test_case(
+    case_id: int,
+    payload: TestCaseUpdate,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"Update an existing test case result.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestCaseService(db)
+    try:
+        result = await service.update_case(case_id, payload)
+        logger.info(\"test_case_api_updated\", case_id=case_id, correlation_id=correlation_id)
+        return result
+    except TestCaseNotFoundError:
+        logger.warning(\"test_case_not_found_api\", case_id=case_id, correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail={\"error\": \"Test case not found\", \"type\": \"TestCaseNotFoundError\", \"correlation_id\": correlation_id}
+        )
+    except Exception as e:
+        logger.error(\"test_case_update_failed\", case_id=case_id, error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.get(\"/cases/{case_id}\", response_model=TestCaseResponse)
+async def get_test_case(
+    case_id: int,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"Get a specific test case by ID.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestCaseService(db)
+    try:
+        result = await service.get_case(case_id)
+        logger.info(\"test_case_api_retrieved\", case_id=case_id, correlation_id=correlation_id)
+        return result
+    except TestCaseNotFoundError:
+        logger.warning(\"test_case_not_found_api\", case_id=case_id, correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail={\"error\": \"Test case not found\", \"type\": \"TestCaseNotFoundError\", \"correlation_id\": correlation_id}
+        )
+    except Exception as e:
+        logger.error(\"test_case_retrieval_failed\", case_id=case_id, error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.get(\"/runs/{run_id}/cases\", response_model=List[TestCaseResponse])
+async def list_test_cases_for_run(
+    run_id: int,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"List all test cases for a given run.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestCaseService(db)
+    try:
+        results = await service.list_cases_for_run(run_id)
+        logger.info(\"test_cases_for_run_api_listed\", run_id=run_id, count=len(results), correlation_id=correlation_id)
+        return results
+    except Exception as e:
+        logger.error(\"test_cases_for_run_listing_failed\", run_id=run_id, error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.post(\"/coverage\", response_model=TestCoverageReportResponse, status_code=status.HTTP_201_CREATED)
+async def create_coverage_report(
+    payload: TestCoverageReportCreate,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"Create a new test coverage report.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestCoverageReportService(db)
+    try:
+        result = await service.create_report(payload)
+        logger.info(\"coverage_report_api_created\", report_id=result.id, correlation_id=correlation_id)
+        return result
+    except Exception as e:
+        logger.error(\"coverage_report_creation_failed\", error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.put(\"/coverage/{report_id}\", response_model=TestCoverageReportResponse)
+async def update_coverage_report(
+    report_id: int,
+    payload: TestCoverageReportUpdate,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"Update an existing test coverage report.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestCoverageReportService(db)
+    try:
+        result = await service.update_report(report_id, payload)
+        logger.info(\"coverage_report_api_updated\", report_id=report_id, correlation_id=correlation_id)
+        return result
+    except CoverageReportNotFoundError:
+        logger.warning(\"coverage_report_not_found_api\", report_id=report_id, correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail={\"error\": \"Coverage report not found\", \"type\": \"CoverageReportNotFoundError\", \"correlation_id\": correlation_id}
+        )
+    except Exception as e:
+        logger.error(\"coverage_report_update_failed\", report_id=report_id, error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.get(\"/coverage/latest/{module_name}\", response_model=TestCoverageReportResponse)
+async def get_latest_coverage_report(
+    module_name: str,
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"Get the latest coverage report for a module.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestCoverageReportService(db)
+    try:
+        report = await service.get_latest_report(module_name)
+        if not report:
+            logger.warning(\"no_coverage_report_found_api\", module=module_name, correlation_id=correlation_id)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, 
+                detail={\"error\": \"No reports found\", \"type\": \"CoverageReportNotFound\", \"correlation_id\": correlation_id}
+            )
+        logger.info(\"latest_coverage_report_api_retrieved\", module=module_name, report_id=report.id, correlation_id=correlation_id)
+        return report
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        logger.error(\"latest_coverage_report_retrieval_failed\", module=module_name, error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )
+
+
+@router.get(\"/coverage\", response_model=List[TestCoverageReportResponse])
+async def list_coverage_reports(
+    limit: int = Query(50, le=100),
+    offset: int = Query(0),
+    db: AsyncSession = Depends(get_async_session),
+):
+    \"\"\"List recent coverage reports with pagination.\"\"\"
+    correlation_id = str(uuid.uuid4())
+    service = TestCoverageReportService(db)
+    try:
+        results = await service.list_reports(limit=limit, offset=offset)
+        logger.info(\"coverage_reports_api_listed\", count=len(results), correlation_id=correlation_id)
+        return results
+    except Exception as e:
+        logger.error(\"coverage_reports_listing_failed\", error=str(e), correlation_id=correlation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail={\"error\": \"Internal server error\", \"type\": \"InternalServerError\", \"correlation_id\": correlation_id}
+        )"}
